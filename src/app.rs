@@ -43,7 +43,11 @@ impl App {
     }
 
     fn forward(args: &[OsString]) -> Result<ExitCode, Error> {
-        crate::cleanup::Cleanup::before_command(args)?;
+        if let Err(error) = crate::cleanup::Cleanup::before_command(args) {
+            tracing::warn!(
+                "cargo-target-cleaner: {error}; continuing with requested Cargo command"
+            );
+        }
         let mut command = Command::new("cargo");
         command.args(args);
 

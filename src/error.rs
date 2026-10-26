@@ -24,7 +24,7 @@ pub enum Error {
         operation: CargoOperation,
         source: io::Error,
     },
-    #[error("cargo clean failed ({0}); requested command was not run")]
+    #[error("cargo clean failed ({0})")]
     CleanFailed(ExitStatus),
     #[error("cargo metadata failed ({status}): {}", String::from_utf8_lossy(stderr).trim())]
     MetadataFailed { status: ExitStatus, stderr: Vec<u8> },

@@ -106,7 +106,8 @@ global setting when omitted.
    at most one target directory. Cleanup removes **all Cargo artifacts in the selected target**,
    including other profiles or projects sharing it. Source files remain intact.
 4. The original command runs with its arguments and exit status preserved.
-   Configuration, measurement, registry, or cleanup errors stop the command.
+   Configuration, measurement, registry, or cleanup errors are reported as warnings;
+   the original Cargo command still runs.
 
 ### Cleanup across disks
 

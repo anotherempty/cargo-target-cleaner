@@ -12,7 +12,6 @@ mod tests {
     const FORWARD_AFTER_CLEAN_INDEX: usize = 2;
     const CLEAN_AND_FORWARD_CALLS: usize = 3;
     const METADATA_AND_FORWARD_CALLS: usize = 2;
-    const METADATA_AND_FAILED_CLEAN_CALLS: usize = 2;
     const FORWARD_ONLY_CALLS: usize = 1;
     const CONFLICTING_THRESHOLDS_CONFIG: &str =
         "max_target_size_gib = 20\n[free_space]\nmin_free_space_gib = 10\nacross_projects = true";
@@ -25,7 +24,6 @@ mod tests {
     const EXECUTABLE_MODE: u32 = 0o755;
     const FORWARDED_EXIT_CODE: i32 = 37;
     const CLEAN_FAILURE_EXIT_CODE: i32 = 9;
-    const WRAPPER_FAILURE_EXIT_CODE: i32 = 1;
     const SUCCESS_EXIT_CODE: i32 = 0;
     const TARGET_LIMIT_CONFIG: &str = "max_target_size_gib = 1";
     // An intentionally unattainable free-space requirement forces cleanup.
@@ -208,8 +206,8 @@ esac
                 fixture.global("verbose = 1").unwrap();
             }
             let output = fixture.run(&["build"]).unwrap();
-            assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
-            assert!(fixture.calls().unwrap().is_empty());
+            assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
+            assert_eq!(fixture.calls().unwrap(), "build\n");
         }
     }
 
@@ -320,7 +318,7 @@ esac
     }
 
     #[test]
-    fn invalid_configuration_blocks_cleanup_and_build() {
+    fn invalid_configuration_warns_and_forwards_build() {
         for config in [
             ZERO_LIMIT_CONFIG,
             NEGATIVE_LIMIT_CONFIG,
@@ -329,22 +327,25 @@ esac
             "not toml",
         ] {
             let fixture = Fixture::new(config).unwrap();
-            assert!(!fixture.run(&["build"]).unwrap().status.success());
-            assert!(fixture.calls().unwrap().is_empty());
+            assert_eq!(
+                fixture.run(&["build"]).unwrap().status.code(),
+                Some(FORWARDED_EXIT_CODE)
+            );
+            assert_eq!(fixture.calls().unwrap(), "build\n");
         }
     }
 
     #[test]
-    fn project_free_space_setting_is_rejected_before_running_cargo() {
+    fn project_free_space_setting_warns_and_forwards_build() {
         let fixture = Fixture::new(CONFLICTING_THRESHOLDS_CONFIG).unwrap();
         let output = fixture.run(&["build"]).unwrap();
-        assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
+        assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
         assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field `free_space`"));
-        assert!(fixture.calls().unwrap().is_empty());
+        assert_eq!(fixture.calls().unwrap(), "build\n");
     }
 
     #[test]
-    fn failed_clean_blocks_build() {
+    fn failed_clean_warns_and_forwards_build() {
         let fixture = Fixture::with_global(LOW_DISK_CONFIG).unwrap();
         let output = fixture
             .command(&["build"])
@@ -352,11 +353,55 @@ esac
             .env("CLEANER_CLEAN_EXIT", CLEAN_FAILURE_EXIT_CODE.to_string())
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("requested command was not run"));
+        assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("continuing with requested Cargo command")
+        );
         assert_eq!(
             fixture.calls().unwrap().lines().count(),
-            METADATA_AND_FAILED_CLEAN_CALLS
+            CLEAN_AND_FORWARD_CALLS
+        );
+    }
+
+    #[test]
+    fn invalid_metadata_warns_and_preserves_forwarded_arguments_and_status() {
+        for exit_code in [SUCCESS_EXIT_CODE, FORWARDED_EXIT_CODE] {
+            let fixture = Fixture::new(TARGET_LIMIT_CONFIG).unwrap();
+            let output = fixture
+                .command(&["build", "--release"])
+                .unwrap()
+                .env("CLEANER_METADATA", "invalid json")
+                .env("CLEANER_FORWARD_EXIT", exit_code.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(exit_code));
+            assert_eq!(output.stdout, b"forwarded");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("parse cargo metadata"));
+            let calls = fixture.calls().unwrap();
+            assert_eq!(calls.lines().count(), METADATA_AND_FORWARD_CALLS);
+            assert_eq!(calls.lines().last(), Some("build --release"));
+        }
+    }
+
+    #[test]
+    fn registry_save_failure_after_cleanup_still_forwards() {
+        const REGISTRY_LOCK_PATH: &str = "home/.cargo-target-cleaner/projects.lock";
+        let fixture = Fixture::with_global(LOW_DISK_CONFIG).unwrap();
+        fs::create_dir_all(fixture.root.join(REGISTRY_LOCK_PATH)).unwrap();
+        let output = fixture.run(&["build"]).unwrap();
+        assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
+        assert_eq!(output.stdout, b"forwarded");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("projects.lock"));
+        assert_eq!(
+            fixture.calls().unwrap().lines().count(),
+            CLEAN_AND_FORWARD_CALLS
+        );
+        assert!(
+            !fixture
+                .root
+                .join("home/.cargo-target-cleaner/projects.toml")
+                .exists()
         );
     }
 
@@ -381,6 +426,7 @@ esac
                 .unwrap();
             assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
             assert!(fixture.calls().unwrap().contains("clean --"));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("cargo clean failed"));
             assert!(
                 fixture
                     .root
@@ -406,7 +452,7 @@ esac
                 .env("CLEANER_CLEAN_EXIT", CLEAN_FAILURE_EXIT_CODE.to_string())
                 .output()
                 .unwrap();
-            assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
+            assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
             if existing {
                 assert_eq!(
                     fs::read_to_string(&registry_path).unwrap(),
@@ -474,14 +520,14 @@ esac
     }
 
     #[test]
-    fn invalid_global_config_blocks_build_even_with_project_override() {
+    fn invalid_global_config_warns_and_forwards_even_with_project_override() {
         for project in ["", TARGET_LIMIT_CONFIG] {
             let fixture = Fixture::new(project).unwrap();
             fixture.global("invalid toml").unwrap();
             let output = fixture.run(&["build"]).unwrap();
-            assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
+            assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
             assert!(String::from_utf8_lossy(&output.stderr).contains("invalid"));
-            assert!(fixture.calls().unwrap().is_empty());
+            assert_eq!(fixture.calls().unwrap(), "build\n");
         }
     }
 
@@ -898,7 +944,7 @@ esac
         let path = directory.join("projects.toml");
         fs::write(&path, "invalid registry").unwrap();
         let output = fixture.run(&["build"]).unwrap();
-        assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
+        assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
         assert!(!fixture.calls().unwrap().contains("clean --"));
         assert_eq!(fs::read_to_string(path).unwrap(), "invalid registry");
     }
@@ -1105,9 +1151,9 @@ esac
         let fixture = Fixture::new(REGISTRATION_CONFIG).unwrap();
         fixture.global(LOW_DISK_CONFIG).unwrap();
         let output = fixture.run(&["build"]).unwrap();
-        assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
+        assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
         assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field `free_space`"));
-        assert!(fixture.calls().unwrap().is_empty());
+        assert_eq!(fixture.calls().unwrap(), "build\n");
     }
 
     #[test]
@@ -1223,7 +1269,7 @@ esac
     }
 
     #[test]
-    fn invalid_free_space_objects_are_rejected_before_cargo_runs() {
+    fn invalid_free_space_objects_warn_and_forward_cargo() {
         for config in [
             "free_space = 100",
             "min_free_space_gib = 100",
@@ -1238,9 +1284,9 @@ esac
             let fixture = Fixture::with_global(config).unwrap();
             assert_eq!(
                 fixture.run(&["build"]).unwrap().status.code(),
-                Some(WRAPPER_FAILURE_EXIT_CODE)
+                Some(FORWARDED_EXIT_CODE)
             );
-            assert!(fixture.calls().unwrap().is_empty());
+            assert_eq!(fixture.calls().unwrap(), "build\n");
         }
     }
 }
