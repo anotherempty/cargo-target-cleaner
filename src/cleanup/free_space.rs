@@ -53,7 +53,7 @@ impl FreeSpacePolicy {
         match &registry {
             None => Cleanup::clean(invocation.command(CargoOperation::Clean), target)?,
             Some(registry) => {
-                if let Some(project) = registry.heaviest(filesystem)? {
+                if let Some(project) = registry.heaviest(filesystem) {
                     let command = if project.is_current(&workspace.workspace_root, target)? {
                         invocation.command(CargoOperation::Clean)
                     } else {

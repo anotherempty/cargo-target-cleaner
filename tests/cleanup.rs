@@ -731,6 +731,68 @@ esac
     }
 
     #[test]
+    fn inaccessible_registered_projects_are_retained_while_accessible_targets_are_cleaned() {
+        const INACCESSIBLE_MODE: u32 = 0o000;
+        const PROJECT_COUNT: usize = 2;
+        const MANIFEST_NAME: &str = "Cargo.toml";
+        const REGISTRY_PATH: &str = "home/.cargo-target-cleaner/projects.toml";
+        const TARGET_NAME: &str = "target";
+        for measurement_failure in [false, true] {
+            let old = Fixture::with_global(REGISTRATION_CONFIG).unwrap();
+            old.run(&["build"]).unwrap();
+            old.global(LOW_DISK_CONFIG).unwrap();
+            let old_target = old.root.join(TARGET_NAME);
+            let permissions = fs::metadata(&old_target).unwrap().permissions();
+            if measurement_failure {
+                fs::set_permissions(&old_target, fs::Permissions::from_mode(INACCESSIBLE_MODE))
+                    .unwrap();
+                if fs::read_dir(&old_target).is_ok() {
+                    // Privileged test runners bypass directory permissions.
+                    fs::set_permissions(&old_target, permissions).unwrap();
+                    continue;
+                }
+            } else {
+                let manifest = old.root.join(MANIFEST_NAME);
+                fs::remove_file(&manifest).unwrap();
+                std::os::unix::fs::symlink(MANIFEST_NAME, &manifest).unwrap();
+            }
+            let current = Fixture::new(TARGET_LIMIT_CONFIG).unwrap();
+            current
+                .artifact("target/artifact", OVERSIZED_ARTIFACT_BYTES)
+                .unwrap();
+            let output = current
+                .command(&["build"])
+                .unwrap()
+                .env("HOME", old.root.join("home"))
+                .output()
+                .unwrap();
+            fs::set_permissions(&old_target, permissions).unwrap();
+            assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("skipping inaccessible registered project")
+            );
+            let calls = current.calls().unwrap();
+            const BOTH_POLICIES_CLEAN_COUNT: usize = 2;
+            let expected_clean = format!(
+                "clean --target-dir {}",
+                current.root.join(TARGET_NAME).display()
+            );
+            assert_eq!(
+                calls.lines().filter(|line| *line == expected_clean).count(),
+                BOTH_POLICIES_CLEAN_COUNT
+            );
+            let registry: toml::Value =
+                toml::from_str(&fs::read_to_string(old.root.join(REGISTRY_PATH)).unwrap()).unwrap();
+            let projects = Fixture::registered_projects(&registry).unwrap();
+            assert_eq!(projects.len(), PROJECT_COUNT);
+            assert!(projects.iter().any(|project| {
+                project.get("target").and_then(toml::Value::as_str) == old_target.to_str()
+            }));
+        }
+    }
+
+    #[test]
     fn current_project_is_registered_before_largest_selection() {
         const SMALL_BYTES: u64 = 8;
         const LARGE_BYTES: u64 = 32;

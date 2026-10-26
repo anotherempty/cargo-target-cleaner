@@ -29,7 +29,7 @@ impl Registry {
             .ok_or(Error::MissingRegistryHome)?;
         let directory = PathBuf::from(home).join(Self::DIRECTORY_NAME);
         let path = directory.join(Self::FILE_NAME);
-        let mut registry = Self::read(&path)?.refresh()?;
+        let mut registry = Self::read(&path)?.refresh();
         if let Some(current) = Project::resolve(workspace, target)? {
             registry.insert(current)?;
         }
@@ -47,14 +47,30 @@ impl Registry {
         }
     }
 
-    fn refresh(self) -> Result<Self, Error> {
+    fn refresh(self) -> Self {
         let mut refreshed = Self::default();
-        for project in self.filesystems.into_values().flatten() {
-            if let Some(project) = Project::resolve(&project.workspace, &project.target)? {
-                refreshed.insert(project)?;
+        for (filesystem, projects) in self.filesystems {
+            for project in projects {
+                let resolved =
+                    Project::resolve(&project.workspace, &project.target).and_then(|resolved| {
+                        resolved
+                            .map(|project| {
+                                FilesystemId::resolve(&project.target)
+                                    .map(|filesystem| (filesystem, project))
+                            })
+                            .transpose()
+                    });
+                match resolved {
+                    Ok(Some((filesystem, project))) => refreshed.insert_at(filesystem, project),
+                    Ok(None) => {}
+                    Err(error) => {
+                        project.warn_inaccessible(&error);
+                        refreshed.insert_at(filesystem, project);
+                    }
+                }
             }
         }
-        Ok(refreshed)
+        refreshed
     }
 
     pub(super) fn persist(self) -> Result<(), Error> {
@@ -78,10 +94,13 @@ impl Registry {
         fs2::FileExt::lock_exclusive(&lock)
             .map_err(|source| Error::file(FileOperation::Lock, &lock_path, source))?;
         // Merge registrations committed by other wrappers while cleanup ran.
-        let mut registry = Self::read(&path)?.refresh()?;
-        for project in self.refresh()?.filesystems.into_values().flatten() {
-            registry.insert(project)?;
+        let mut registry = Self::read(&path)?;
+        for (filesystem, projects) in self.filesystems {
+            for project in projects {
+                registry.insert_at(filesystem, project);
+            }
         }
+        let registry = registry.refresh();
         let mut temporary = tempfile::NamedTempFile::new_in(&directory)
             .map_err(|source| Error::file(FileOperation::Create, &path, source))?;
         let contents =
@@ -110,13 +129,21 @@ impl Registry {
 
     fn insert(&mut self, project: Project) -> Result<(), Error> {
         let filesystem = FilesystemId::resolve(&project.target)?;
-        let projects = self.filesystems.entry(filesystem).or_default();
-        projects.retain(|existing| existing.target != project.target);
-        projects.push(project);
+        self.insert_at(filesystem, project);
         Ok(())
     }
 
-    pub(super) fn heaviest(&self, filesystem: FilesystemId) -> Result<Option<&Project>, Error> {
+    fn insert_at(&mut self, filesystem: FilesystemId, project: Project) {
+        for projects in self.filesystems.values_mut() {
+            projects.retain(|existing| existing.target != project.target);
+        }
+        self.filesystems
+            .entry(filesystem)
+            .or_default()
+            .push(project);
+    }
+
+    pub(super) fn heaviest(&self, filesystem: FilesystemId) -> Option<&Project> {
         let projects = self
             .filesystems
             .get(&filesystem)
@@ -129,13 +156,14 @@ impl Registry {
         );
         let mut largest = None;
         for project in projects {
-            if Project::resolve(&project.workspace, &project.target)?.is_none()
-                || FilesystemId::resolve(&project.target)? != filesystem
-            {
-                continue;
-            }
-            tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, target = %project.target.display(), "cargo-target-cleaner: measuring registered target");
-            let size = Project::target_size(&project.target, None)?;
+            let size = match project.eligible_size(filesystem) {
+                Ok(Some(size)) => size,
+                Ok(None) => continue,
+                Err(error) => {
+                    project.warn_inaccessible(&error);
+                    continue;
+                }
+            };
             tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, target = %project.target.display(), size_bytes = size, "cargo-target-cleaner: measured registered target");
             if largest.is_none_or(|(_, largest_size)| size > largest_size) {
                 largest = Some((project, size));
@@ -148,7 +176,7 @@ impl Registry {
                 "cargo-target-cleaner: no eligible registered targets; skipping free-space cleanup"
             );
         }
-        Ok(largest.map(|(project, _)| project))
+        largest.map(|(project, _)| project)
     }
 }
 
@@ -178,6 +206,21 @@ impl TryFrom<ProjectFields> for Project {
 
 impl Project {
     const MANIFEST_FILE_NAME: &str = "Cargo.toml";
+
+    fn warn_inaccessible(&self, error: &Error) {
+        tracing::warn!(workspace = %self.workspace.display(), target = %self.target.display(),
+            "cargo-target-cleaner: skipping inaccessible registered project: {error}");
+    }
+
+    fn eligible_size(&self, filesystem: FilesystemId) -> Result<Option<u64>, Error> {
+        if Self::resolve(&self.workspace, &self.target)?.is_none()
+            || FilesystemId::resolve(&self.target)? != filesystem
+        {
+            return Ok(None);
+        }
+        tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, target = %self.target.display(), "cargo-target-cleaner: measuring registered target");
+        Self::target_size(&self.target, None).map(Some)
+    }
 
     fn resolve(workspace: &Path, target: &Path) -> Result<Option<Self>, Error> {
         // Stored paths must be absolute; relative entries must never select a
