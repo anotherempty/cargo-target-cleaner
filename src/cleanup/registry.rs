@@ -17,13 +17,18 @@ pub(super) struct Registry {
 }
 
 impl Registry {
+    const HOME_ENV: &str = "HOME";
+    const DIRECTORY_NAME: &str = ".cargo-target-cleaner";
+    const FILE_NAME: &str = "projects.toml";
+    const LOCK_FILE_NAME: &str = "projects.lock";
+
     pub(super) fn register(workspace: &Path, target: &Path) -> Result<Self, Error> {
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, workspace = %workspace.display(), "cargo-target-cleaner: updating project registry");
-        let home = std::env::var_os("HOME")
+        let home = std::env::var_os(Self::HOME_ENV)
             .filter(|home| !home.is_empty())
             .ok_or(Error::MissingRegistryHome)?;
-        let directory = PathBuf::from(home).join(".cargo-target-cleaner");
-        let path = directory.join("projects.toml");
+        let directory = PathBuf::from(home).join(Self::DIRECTORY_NAME);
+        let path = directory.join(Self::FILE_NAME);
         let mut registry = Self::read(&path)?.refresh()?;
         if let Some(current) = Project::resolve(workspace, target)? {
             registry.insert(current)?;
@@ -53,15 +58,15 @@ impl Registry {
     }
 
     pub(super) fn persist(self) -> Result<(), Error> {
-        let home = std::env::var_os("HOME")
+        let home = std::env::var_os(Self::HOME_ENV)
             .filter(|home| !home.is_empty())
             .ok_or(Error::MissingRegistryHome)?;
-        let directory = PathBuf::from(home).join(".cargo-target-cleaner");
+        let directory = PathBuf::from(home).join(Self::DIRECTORY_NAME);
         fs::create_dir_all(&directory)
             .map_err(|source| Error::file(FileOperation::Create, &directory, source))?;
-        let path = directory.join("projects.toml");
+        let path = directory.join(Self::FILE_NAME);
         // A separate lock stays valid across atomic replacement of the registry.
-        let lock_path = directory.join("projects.lock");
+        let lock_path = directory.join(Self::LOCK_FILE_NAME);
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -172,6 +177,8 @@ impl TryFrom<ProjectFields> for Project {
 }
 
 impl Project {
+    const MANIFEST_FILE_NAME: &str = "Cargo.toml";
+
     fn resolve(workspace: &Path, target: &Path) -> Result<Option<Self>, Error> {
         // Stored paths must be absolute; relative entries must never select a
         // target according to a later caller's working directory.
@@ -179,7 +186,7 @@ impl Project {
             return Ok(None);
         }
         for (path, directory) in [
-            (workspace.join("Cargo.toml"), false),
+            (workspace.join(Self::MANIFEST_FILE_NAME), false),
             (target.to_owned(), true),
         ] {
             match fs::metadata(&path) {
@@ -215,7 +222,7 @@ impl Project {
             .current_dir(&self.workspace)
             .arg("clean")
             .arg("--manifest-path")
-            .arg(self.workspace.join("Cargo.toml"));
+            .arg(self.workspace.join(Self::MANIFEST_FILE_NAME));
         command
     }
 
