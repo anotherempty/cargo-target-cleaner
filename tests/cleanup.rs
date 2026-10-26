@@ -75,6 +75,12 @@ case "$1" in +*) shift;; esac
 case "$1" in
   metadata) printf '%s' "$CLEANER_METADATA";;
   clean)
+    if [ -n "${CLEANER_REMOVE_TARGET:-}" ]; then
+      rm -rf -- "$CLEANER_REMOVE_TARGET" || exit "$CLEANER_CLEAN_EXIT"
+      if [ -n "${CLEANER_BLOCK_RESTORE:-}" ]; then
+        printf 'blocked' > "$CLEANER_REMOVE_TARGET"
+      fi
+    fi
     if [ -n "${CLEANER_REQUIRE_NO_REGISTRY:-}" ] && [ -e "$HOME/.cargo-target-cleaner" ]; then
       exit "$CLEANER_CLEAN_EXIT"
     fi
@@ -403,6 +409,38 @@ esac
                 .join("home/.cargo-target-cleaner/projects.toml")
                 .exists()
         );
+    }
+
+    #[test]
+    fn failed_clean_restores_symlink_destination_and_reports_restoration_errors() {
+        const DESTINATION_NAME: &str = "artifacts";
+        const TARGET_NAME: &str = "target";
+        for block_restoration in [false, true] {
+            let fixture = Fixture::with_global(LOW_DISK_CONFIG).unwrap();
+            let target = fixture.root.join(TARGET_NAME);
+            let destination = fixture.root.join(DESTINATION_NAME);
+            fs::rename(&target, &destination).unwrap();
+            std::os::unix::fs::symlink(&destination, &target).unwrap();
+            let output = fixture
+                .command(&["build"])
+                .unwrap()
+                .env("CLEANER_REMOVE_TARGET", &destination)
+                .env(
+                    "CLEANER_BLOCK_RESTORE",
+                    if block_restoration { "true" } else { "" },
+                )
+                .env("CLEANER_CLEAN_EXIT", CLEAN_FAILURE_EXIT_CODE.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
+            assert!(target.is_symlink());
+            assert_eq!(fs::read_link(&target).unwrap(), destination);
+            assert_eq!(target.is_dir(), !block_restoration);
+            let diagnostics = String::from_utf8_lossy(&output.stderr);
+            assert!(diagnostics.contains("cargo clean failed"));
+            assert_eq!(diagnostics.contains("failed to create"), block_restoration);
+            assert_eq!(fixture.calls().unwrap().lines().last(), Some("build"));
+        }
     }
 
     #[test]

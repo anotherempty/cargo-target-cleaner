@@ -59,12 +59,19 @@ impl FreeSpacePolicy {
                     } else {
                         project.clean_command()
                     };
-                    Cleanup::clean(command, project.target())?;
-                    // Cleaning the canonical path removes the destination of any
-                    // target symlinks. Restore it so those links remain usable.
-                    std::fs::create_dir_all(project.target()).map_err(|source| {
+                    let cleanup = Cleanup::clean(command, project.target());
+                    // Restore symlink destinations even after partial or timed-out cleanup.
+                    let restoration = std::fs::create_dir_all(project.target()).map_err(|source| {
                         Error::file(FileOperation::Create, project.target(), source)
-                    })?;
+                    });
+                    match (cleanup, restoration) {
+                        (Err(cleanup), Err(restoration)) => {
+                            tracing::warn!("cargo-target-cleaner: {restoration}");
+                            return Err(cleanup);
+                        }
+                        (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+                        (Ok(()), Ok(())) => {}
+                    }
                 }
             }
         }

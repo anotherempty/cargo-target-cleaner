@@ -107,7 +107,8 @@ global setting when omitted.
    including other profiles or projects sharing it. Source files remain intact.
    Each `cargo clean` process has a 10-minute timeout. On timeout, the wrapper
    terminates and waits for that process before forwarding Cargo; partial deletions
-   are not rolled back. This timeout does not cover metadata, filesystem scans,
+   are not rolled back. Cross-project cleanup attempts to restore target symlink
+   destinations even after cleanup errors or timeouts. This timeout does not cover metadata, filesystem scans,
    or registry locking.
 4. The original command runs with its arguments and exit status preserved.
    Configuration, measurement, registry, or cleanup errors are reported as warnings;
