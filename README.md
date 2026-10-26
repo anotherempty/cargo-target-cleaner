@@ -105,6 +105,10 @@ global setting when omitted.
 3. The free-space policy runs first, then the target-size policy. Each policy cleans
    at most one target directory. Cleanup removes **all Cargo artifacts in the selected target**,
    including other profiles or projects sharing it. Source files remain intact.
+   Each `cargo clean` process has a 10-minute timeout. On timeout, the wrapper
+   terminates and waits for that process before forwarding Cargo; partial deletions
+   are not rolled back. This timeout does not cover metadata, filesystem scans,
+   or registry locking.
 4. The original command runs with its arguments and exit status preserved.
    Configuration, measurement, registry, or cleanup errors are reported as warnings;
    the original Cargo command still runs.

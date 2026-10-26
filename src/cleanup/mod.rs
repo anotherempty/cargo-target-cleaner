@@ -7,7 +7,8 @@ use std::fs;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -18,6 +19,9 @@ use registry::Project;
 pub struct Cleanup;
 
 impl Cleanup {
+    const CLEAN_TIMEOUT: Duration = Duration::from_secs(600);
+    const CLEAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
     pub fn before_command(args: &[OsString]) -> Result<(), Error> {
         let Some(invocation) = Invocation::parse(args) else {
             return Ok(());
@@ -56,23 +60,56 @@ impl Cleanup {
     }
 
     fn clean(mut command: Command, target: &Path) -> Result<(), Error> {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         tracing::info!(
             "cargo-target-cleaner: running cargo clean ({})",
             target.display()
         );
-        let status = command
+        let mut child = command
             .arg("--target-dir")
             .arg(target)
-            .status()
+            .spawn()
             .map_err(|source| Error::Execute {
                 operation: CargoOperation::Clean,
                 source,
             })?;
+        let status = Self::wait_for_clean(&mut child, Self::CLEAN_TIMEOUT)?;
         if !status.success() {
             return Err(Error::CleanFailed(status));
         }
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, target = %target.display(), elapsed_seconds = started.elapsed().as_secs_f64(), "cargo-target-cleaner: cargo clean completed");
+        Ok(())
+    }
+
+    fn wait_for_clean(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Error> {
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => {}
+                Err(source) => {
+                    Self::terminate_clean(child)?;
+                    return Err(Error::CleanWait(source));
+                }
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                Self::terminate_clean(child)?;
+                return Err(Error::CleanTimeout(timeout));
+            }
+            std::thread::sleep(remaining.min(Self::CLEAN_POLL_INTERVAL));
+        }
+    }
+
+    fn terminate_clean(child: &mut Child) -> Result<(), Error> {
+        if let Err(source) = child.kill() {
+            // The process may have exited between polling and termination.
+            if child.try_wait().map_err(Error::CleanWait)?.is_some() {
+                return Ok(());
+            }
+            return Err(Error::CleanTerminate(source));
+        }
+        child.wait().map_err(Error::CleanWait)?;
         Ok(())
     }
 
@@ -396,6 +433,42 @@ struct Workspace {
 #[cfg(test)]
 mod tests {
     use super::{ByteLimit, GlobalConfig, PolicyError, ProjectConfig, Threshold};
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_timeout_terminates_and_reaps_process() {
+        const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(20);
+        const LONG_CLEAN_SECONDS: u64 = 30;
+        let mut child = std::process::Command::new("sleep")
+            .arg(LONG_CLEAN_SECONDS.to_string())
+            .spawn()
+            .unwrap();
+        let result = super::Cleanup::wait_for_clean(&mut child, TEST_TIMEOUT);
+        assert!(
+            matches!(result, Err(crate::error::Error::CleanTimeout(timeout)) if timeout == TEST_TIMEOUT)
+        );
+        let status = child.try_wait().unwrap().unwrap();
+        assert!(!status.success());
+        // Waiting again returns the already-reaped status, without a live child.
+        assert_eq!(child.wait().unwrap(), status);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_wait_preserves_exit_status_before_timeout() {
+        const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const SUCCESS_EXIT_CODE: i32 = 0;
+        const FAILURE_EXIT_CODE: i32 = 9;
+        for exit_code in [SUCCESS_EXIT_CODE, FAILURE_EXIT_CODE] {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "exit \"$1\"", "clean-test"])
+                .arg(exit_code.to_string())
+                .spawn()
+                .unwrap();
+            let status = super::Cleanup::wait_for_clean(&mut child, TEST_TIMEOUT).unwrap();
+            assert_eq!(status.code(), Some(exit_code));
+        }
+    }
 
     #[test]
     fn byte_limits_reject_zero_and_overflow_for_each_threshold() {
