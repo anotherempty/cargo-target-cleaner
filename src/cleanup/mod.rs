@@ -25,7 +25,7 @@ impl Cleanup {
         let cwd = std::env::current_dir().map_err(Error::CurrentDirectory)?;
         let manifest = invocation.manifest.as_ref().map(|path| cwd.join(path));
         let start = manifest.as_deref().and_then(Path::parent).unwrap_or(&cwd);
-        let mut settings = Config::find(start)?;
+        let settings = Config::find(start)?;
         if settings.min_free.is_none() && settings.max_target.is_none() {
             return Ok(());
         }
@@ -39,13 +39,17 @@ impl Cleanup {
         let target = target_override
             .as_deref()
             .unwrap_or(&workspace.target_directory);
-        if let Some(policy) = &mut settings.min_free {
-            policy.apply(&invocation, &workspace, target)?;
-        }
+        let registry = match &settings.min_free {
+            Some(policy) => policy.apply(&invocation, &workspace, target)?,
+            None => None,
+        };
         if let Some(limit) = settings.max_target
             && Self::directory_exceeds(target, limit)?
         {
             Self::clean(invocation.command(CargoOperation::Clean), target)?;
+        }
+        if let Some(registry) = registry {
+            registry.persist()?;
         }
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: cleanup checks complete; forwarding Cargo command");
         Ok(())

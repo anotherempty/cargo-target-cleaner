@@ -99,7 +99,9 @@ global setting when omitted.
    `~/.cargo-target-cleaner/projects.toml`, grouped by target filesystem. Projects are
    discovered as you use the wrapper, without scanning your disk. Each registry
    update refreshes filesystem identities, removes missing projects or targets,
-   and deduplicates shared target directories.
+   and deduplicates shared target directories. The refreshed registry stays in memory
+   until both cleanup policies succeed, then is merged with concurrent registrations
+   and saved atomically. Failed cleanup leaves the registry unchanged.
 3. The free-space policy runs first, then the target-size policy. Each policy cleans
    at most one target directory. Cleanup removes **all Cargo artifacts in the selected target**,
    including other profiles or projects sharing it. Source files remain intact.

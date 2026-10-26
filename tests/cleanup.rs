@@ -76,7 +76,14 @@ printf '%s\n' "$*" >> "$CLEANER_LOG"
 case "$1" in +*) shift;; esac
 case "$1" in
   metadata) printf '%s' "$CLEANER_METADATA";;
-  clean) exit "${CLEANER_CLEAN_EXIT:-0}";;
+  clean)
+    if [ -n "${CLEANER_REQUIRE_NO_REGISTRY:-}" ] && [ -e "$HOME/.cargo-target-cleaner" ]; then
+      exit "$CLEANER_CLEAN_EXIT"
+    fi
+    if [ -n "${CLEANER_REQUIRE_NO_REGISTRY:-}" ]; then
+      exit 0
+    fi
+    exit "${CLEANER_CLEAN_EXIT:-0}";;
   *) printf 'forwarded'; exit "$CLEANER_FORWARD_EXIT";;
 esac
 "#,
@@ -351,6 +358,64 @@ esac
             fixture.calls().unwrap().lines().count(),
             METADATA_AND_FAILED_CLEAN_CALLS
         );
+    }
+
+    #[test]
+    fn registry_is_created_only_after_all_cleanup_policies() {
+        for config in [LOW_DISK_CONFIG, REGISTRATION_CONFIG] {
+            let fixture = Fixture::with_global(config).unwrap();
+            fs::write(
+                fixture.root.join(".cargo-target-cleaner.toml"),
+                TARGET_LIMIT_CONFIG,
+            )
+            .unwrap();
+            fixture
+                .artifact("target/artifact", OVERSIZED_ARTIFACT_BYTES)
+                .unwrap();
+            let output = fixture
+                .command(&["build"])
+                .unwrap()
+                .env("CLEANER_REQUIRE_NO_REGISTRY", "true")
+                .env("CLEANER_CLEAN_EXIT", CLEAN_FAILURE_EXIT_CODE.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(FORWARDED_EXIT_CODE));
+            assert!(fixture.calls().unwrap().contains("clean --"));
+            assert!(
+                fixture
+                    .root
+                    .join("home/.cargo-target-cleaner/projects.toml")
+                    .is_file()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_cleanup_preserves_registry_and_does_not_create_one() {
+        let fixture = Fixture::with_global(LOW_DISK_CONFIG).unwrap();
+        let registry_directory = fixture.root.join("home/.cargo-target-cleaner");
+        let registry_path = registry_directory.join("projects.toml");
+        for existing in [false, true] {
+            if existing {
+                fs::create_dir_all(&registry_directory).unwrap();
+                fs::write(&registry_path, "[filesystems]\n").unwrap();
+            }
+            let output = fixture
+                .command(&["build"])
+                .unwrap()
+                .env("CLEANER_CLEAN_EXIT", CLEAN_FAILURE_EXIT_CODE.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(WRAPPER_FAILURE_EXIT_CODE));
+            if existing {
+                assert_eq!(
+                    fs::read_to_string(&registry_path).unwrap(),
+                    "[filesystems]\n"
+                );
+            } else {
+                assert!(!registry_directory.exists());
+            }
+        }
     }
 
     #[test]

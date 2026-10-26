@@ -23,6 +23,40 @@ impl Registry {
             .filter(|home| !home.is_empty())
             .ok_or(Error::MissingRegistryHome)?;
         let directory = PathBuf::from(home).join(".cargo-target-cleaner");
+        let path = directory.join("projects.toml");
+        let mut registry = Self::read(&path)?.refresh()?;
+        if let Some(current) = Project::resolve(workspace, target)? {
+            registry.insert(current)?;
+        }
+        Ok(registry)
+    }
+
+    fn read(path: &Path) -> Result<Self, Error> {
+        match fs::read_to_string(path) {
+            Ok(contents) => toml::from_str(&contents).map_err(|source| Error::RegistryRead {
+                path: path.to_owned(),
+                source,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(source) => Err(Error::file(FileOperation::Read, path, source)),
+        }
+    }
+
+    fn refresh(self) -> Result<Self, Error> {
+        let mut refreshed = Self::default();
+        for project in self.filesystems.into_values().flatten() {
+            if let Some(project) = Project::resolve(&project.workspace, &project.target)? {
+                refreshed.insert(project)?;
+            }
+        }
+        Ok(refreshed)
+    }
+
+    pub(super) fn persist(self) -> Result<(), Error> {
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .ok_or(Error::MissingRegistryHome)?;
+        let directory = PathBuf::from(home).join(".cargo-target-cleaner");
         fs::create_dir_all(&directory)
             .map_err(|source| Error::file(FileOperation::Create, &directory, source))?;
         let path = directory.join("projects.toml");
@@ -38,24 +72,11 @@ impl Registry {
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: acquiring project registry lock");
         fs2::FileExt::lock_exclusive(&lock)
             .map_err(|source| Error::file(FileOperation::Lock, &lock_path, source))?;
-        let registry: Self = match fs::read_to_string(&path) {
-            Ok(contents) => toml::from_str(&contents).map_err(|source| Error::RegistryRead {
-                path: path.clone(),
-                source,
-            })?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(source) => return Err(Error::file(FileOperation::Read, &path, source)),
-        };
-        let mut refreshed = Self::default();
-        for project in registry.filesystems.into_values().flatten() {
-            if let Some(project) = Project::resolve(&project.workspace, &project.target)? {
-                refreshed.insert(project)?;
-            }
+        // Merge registrations committed by other wrappers while cleanup ran.
+        let mut registry = Self::read(&path)?.refresh()?;
+        for project in self.refresh()?.filesystems.into_values().flatten() {
+            registry.insert(project)?;
         }
-        if let Some(current) = Project::resolve(workspace, target)? {
-            refreshed.insert(current)?;
-        }
-        let registry = refreshed;
         let mut temporary = tempfile::NamedTempFile::new_in(&directory)
             .map_err(|source| Error::file(FileOperation::Create, &path, source))?;
         let contents =
@@ -79,7 +100,7 @@ impl Registry {
             projects = registry.filesystems.values().map(Vec::len).sum::<usize>(),
             "cargo-target-cleaner: project registry updated"
         );
-        Ok(registry)
+        Ok(())
     }
 
     fn insert(&mut self, project: Project) -> Result<(), Error> {
