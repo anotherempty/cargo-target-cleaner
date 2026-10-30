@@ -1,5 +1,6 @@
 mod filesystem;
 mod free_space;
+mod lock;
 mod registry;
 
 use std::ffi::{OsStr, OsString};
@@ -14,7 +15,10 @@ use serde::Deserialize;
 
 use crate::error::{CargoOperation, Error, FileOperation};
 use free_space::{FreeSpaceConfig, FreeSpacePolicy};
+use lock::CleanupLock;
 use registry::Project;
+
+const STATE_DIRECTORY_NAME: &str = ".cargo-target-cleaner";
 
 pub struct Cleanup;
 
@@ -37,6 +41,10 @@ impl Cleanup {
         let _guard = tracing::subscriber::set_default(crate::diagnostics::Diagnostics::subscriber(
             settings.verbose,
         ));
+        let Some(_cleanup_lock) = CleanupLock::try_acquire()? else {
+            tracing::info!("cargo-target-cleaner: another cleanup is running; skipping cleanup");
+            return Ok(());
+        };
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: resolving Cargo workspace for cleanup checks");
         let workspace = invocation.workspace()?;
         let target_override = invocation.target.as_ref().map(|path| cwd.join(path));

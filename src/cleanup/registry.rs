@@ -18,7 +18,6 @@ pub(super) struct Registry {
 
 impl Registry {
     const HOME_ENV: &str = "HOME";
-    const DIRECTORY_NAME: &str = ".cargo-target-cleaner";
     const FILE_NAME: &str = "projects.toml";
     const LOCK_FILE_NAME: &str = "projects.lock";
 
@@ -27,7 +26,7 @@ impl Registry {
         let home = std::env::var_os(Self::HOME_ENV)
             .filter(|home| !home.is_empty())
             .ok_or(Error::MissingRegistryHome)?;
-        let directory = PathBuf::from(home).join(Self::DIRECTORY_NAME);
+        let directory = PathBuf::from(home).join(super::STATE_DIRECTORY_NAME);
         let path = directory.join(Self::FILE_NAME);
         let mut registry = Self::read(&path)?.refresh();
         if let Some(current) = Project::resolve(workspace, target)? {
@@ -77,7 +76,7 @@ impl Registry {
         let home = std::env::var_os(Self::HOME_ENV)
             .filter(|home| !home.is_empty())
             .ok_or(Error::MissingRegistryHome)?;
-        let directory = PathBuf::from(home).join(Self::DIRECTORY_NAME);
+        let directory = PathBuf::from(home).join(super::STATE_DIRECTORY_NAME);
         fs::create_dir_all(&directory)
             .map_err(|source| Error::file(FileOperation::Create, &directory, source))?;
         let path = directory.join(Self::FILE_NAME);

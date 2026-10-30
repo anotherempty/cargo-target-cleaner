@@ -56,6 +56,8 @@ pub enum Error {
         path: PathBuf,
         source: toml::ser::Error,
     },
+    #[error("cannot locate cleanup lock: HOME is not set")]
+    MissingCleanupHome,
     #[error("cannot locate project registry: HOME is not set")]
     MissingRegistryHome,
     #[error("cannot locate global config: HOME is not set")]

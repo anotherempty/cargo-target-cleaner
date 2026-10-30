@@ -92,7 +92,13 @@ global setting when omitted.
 
 ## How it works
 
-1. Before `build`, `check`, `test`, `run`, `bench`, `doc`, `clippy`, `rustc`, or
+1. Automatic cleanup uses a nonblocking lock at
+   `~/.cargo-target-cleaner/cleanup.lock`. If another wrapper holds it, cleanup is
+   skipped and the requested Cargo command runs immediately. The lock covers
+   workspace resolution, fresh threshold checks, target selection, both cleanup
+   policies, and registry persistence, and is released before forwarding Cargo.
+   It coordinates cleaners; it does not protect active builds from later cleanup.
+   Before `build`, `check`, `test`, `run`, `bench`, `doc`, `clippy`, `rustc`, or
    `rustdoc`, the wrapper asks Cargo for the workspace and target directory.
    Standard single-letter aliases are supported; other commands pass through.
 2. With cross-project cleanup enabled, existing targets are recorded in
