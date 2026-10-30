@@ -17,17 +17,71 @@ pub(super) struct Registry {
 }
 
 impl Registry {
+    const HOME_ENV: &str = "HOME";
+    const FILE_NAME: &str = "projects.toml";
+    const LOCK_FILE_NAME: &str = "projects.lock";
+
     pub(super) fn register(workspace: &Path, target: &Path) -> Result<Self, Error> {
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, workspace = %workspace.display(), "cargo-target-cleaner: updating project registry");
-        let home = std::env::var_os("HOME")
+        let home = std::env::var_os(Self::HOME_ENV)
             .filter(|home| !home.is_empty())
             .ok_or(Error::MissingRegistryHome)?;
-        let directory = PathBuf::from(home).join(".cargo-target-cleaner");
+        let directory = PathBuf::from(home).join(super::STATE_DIRECTORY_NAME);
+        let path = directory.join(Self::FILE_NAME);
+        let mut registry = Self::read(&path)?.refresh();
+        if let Some(current) = Project::resolve(workspace, target)? {
+            registry.insert(current)?;
+        }
+        Ok(registry)
+    }
+
+    fn read(path: &Path) -> Result<Self, Error> {
+        match fs::read_to_string(path) {
+            Ok(contents) => toml::from_str(&contents).map_err(|source| Error::RegistryRead {
+                path: path.to_owned(),
+                source,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(source) => Err(Error::file(FileOperation::Read, path, source)),
+        }
+    }
+
+    fn refresh(self) -> Self {
+        let mut refreshed = Self::default();
+        for (filesystem, projects) in self.filesystems {
+            for project in projects {
+                let resolved =
+                    Project::resolve(&project.workspace, &project.target).and_then(|resolved| {
+                        resolved
+                            .map(|project| {
+                                FilesystemId::resolve(&project.target)
+                                    .map(|filesystem| (filesystem, project))
+                            })
+                            .transpose()
+                    });
+                match resolved {
+                    Ok(Some((filesystem, project))) => refreshed.insert_at(filesystem, project),
+                    Ok(None) => {}
+                    Err(error) => {
+                        project.warn_inaccessible(&error);
+                        refreshed.insert_at(filesystem, project);
+                    }
+                }
+            }
+        }
+        refreshed
+    }
+
+    pub(super) fn persist(self) -> Result<(), Error> {
+        let home = std::env::var_os(Self::HOME_ENV)
+            .filter(|home| !home.is_empty())
+            .ok_or(Error::MissingRegistryHome)?;
+        let directory = PathBuf::from(home).join(super::STATE_DIRECTORY_NAME);
         fs::create_dir_all(&directory)
             .map_err(|source| Error::file(FileOperation::Create, &directory, source))?;
-        let path = directory.join("projects.toml");
+        let path = directory.join(Self::FILE_NAME);
         // A separate lock stays valid across atomic replacement of the registry.
-        let lock_path = directory.join("projects.lock");
+        let lock_path = directory.join(Self::LOCK_FILE_NAME);
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -38,24 +92,14 @@ impl Registry {
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: acquiring project registry lock");
         fs2::FileExt::lock_exclusive(&lock)
             .map_err(|source| Error::file(FileOperation::Lock, &lock_path, source))?;
-        let registry: Self = match fs::read_to_string(&path) {
-            Ok(contents) => toml::from_str(&contents).map_err(|source| Error::RegistryRead {
-                path: path.clone(),
-                source,
-            })?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(source) => return Err(Error::file(FileOperation::Read, &path, source)),
-        };
-        let mut refreshed = Self::default();
-        for project in registry.filesystems.into_values().flatten() {
-            if let Some(project) = Project::resolve(&project.workspace, &project.target)? {
-                refreshed.insert(project)?;
+        // Merge registrations committed by other wrappers while cleanup ran.
+        let mut registry = Self::read(&path)?;
+        for (filesystem, projects) in self.filesystems {
+            for project in projects {
+                registry.insert_at(filesystem, project);
             }
         }
-        if let Some(current) = Project::resolve(workspace, target)? {
-            refreshed.insert(current)?;
-        }
-        let registry = refreshed;
+        let registry = registry.refresh();
         let mut temporary = tempfile::NamedTempFile::new_in(&directory)
             .map_err(|source| Error::file(FileOperation::Create, &path, source))?;
         let contents =
@@ -79,18 +123,26 @@ impl Registry {
             projects = registry.filesystems.values().map(Vec::len).sum::<usize>(),
             "cargo-target-cleaner: project registry updated"
         );
-        Ok(registry)
+        Ok(())
     }
 
     fn insert(&mut self, project: Project) -> Result<(), Error> {
         let filesystem = FilesystemId::resolve(&project.target)?;
-        let projects = self.filesystems.entry(filesystem).or_default();
-        projects.retain(|existing| existing.target != project.target);
-        projects.push(project);
+        self.insert_at(filesystem, project);
         Ok(())
     }
 
-    pub(super) fn heaviest(&self, filesystem: FilesystemId) -> Result<Option<&Project>, Error> {
+    fn insert_at(&mut self, filesystem: FilesystemId, project: Project) {
+        for projects in self.filesystems.values_mut() {
+            projects.retain(|existing| existing.target != project.target);
+        }
+        self.filesystems
+            .entry(filesystem)
+            .or_default()
+            .push(project);
+    }
+
+    pub(super) fn heaviest(&self, filesystem: FilesystemId) -> Option<&Project> {
         let projects = self
             .filesystems
             .get(&filesystem)
@@ -103,13 +155,14 @@ impl Registry {
         );
         let mut largest = None;
         for project in projects {
-            if Project::resolve(&project.workspace, &project.target)?.is_none()
-                || FilesystemId::resolve(&project.target)? != filesystem
-            {
-                continue;
-            }
-            tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, target = %project.target.display(), "cargo-target-cleaner: measuring registered target");
-            let size = Project::target_size(&project.target, None)?;
+            let size = match project.eligible_size(filesystem) {
+                Ok(Some(size)) => size,
+                Ok(None) => continue,
+                Err(error) => {
+                    project.warn_inaccessible(&error);
+                    continue;
+                }
+            };
             tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, target = %project.target.display(), size_bytes = size, "cargo-target-cleaner: measured registered target");
             if largest.is_none_or(|(_, largest_size)| size > largest_size) {
                 largest = Some((project, size));
@@ -122,7 +175,7 @@ impl Registry {
                 "cargo-target-cleaner: no eligible registered targets; skipping free-space cleanup"
             );
         }
-        Ok(largest.map(|(project, _)| project))
+        largest.map(|(project, _)| project)
     }
 }
 
@@ -151,6 +204,23 @@ impl TryFrom<ProjectFields> for Project {
 }
 
 impl Project {
+    const MANIFEST_FILE_NAME: &str = "Cargo.toml";
+
+    fn warn_inaccessible(&self, error: &Error) {
+        tracing::warn!(workspace = %self.workspace.display(), target = %self.target.display(),
+            "cargo-target-cleaner: skipping inaccessible registered project: {error}");
+    }
+
+    fn eligible_size(&self, filesystem: FilesystemId) -> Result<Option<u64>, Error> {
+        if Self::resolve(&self.workspace, &self.target)?.is_none()
+            || FilesystemId::resolve(&self.target)? != filesystem
+        {
+            return Ok(None);
+        }
+        tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, target = %self.target.display(), "cargo-target-cleaner: measuring registered target");
+        Self::target_size(&self.target, None).map(Some)
+    }
+
     fn resolve(workspace: &Path, target: &Path) -> Result<Option<Self>, Error> {
         // Stored paths must be absolute; relative entries must never select a
         // target according to a later caller's working directory.
@@ -158,7 +228,7 @@ impl Project {
             return Ok(None);
         }
         for (path, directory) in [
-            (workspace.join("Cargo.toml"), false),
+            (workspace.join(Self::MANIFEST_FILE_NAME), false),
             (target.to_owned(), true),
         ] {
             match fs::metadata(&path) {
@@ -194,7 +264,7 @@ impl Project {
             .current_dir(&self.workspace)
             .arg("clean")
             .arg("--manifest-path")
-            .arg(self.workspace.join("Cargo.toml"));
+            .arg(self.workspace.join(Self::MANIFEST_FILE_NAME));
         command
     }
 

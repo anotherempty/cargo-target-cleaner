@@ -1,6 +1,9 @@
 mod filesystem;
 mod free_space;
+mod lock;
+mod process;
 mod registry;
+mod supervisor;
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -8,24 +11,49 @@ use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+use process::ProcessTree;
+use supervisor::{Cancellation, Supervisor};
 
 use serde::Deserialize;
 
 use crate::error::{CargoOperation, Error, FileOperation};
 use free_space::{FreeSpaceConfig, FreeSpacePolicy};
+use lock::CleanupLock;
 use registry::Project;
 
-pub struct Cleanup;
+const STATE_DIRECTORY_NAME: &str = ".cargo-target-cleaner";
+
+pub struct Cleanup {
+    cancellation: Cancellation,
+}
 
 impl Cleanup {
+    const CLEAN_TIMEOUT: Duration = Duration::from_secs(600);
+
     pub fn before_command(args: &[OsString]) -> Result<(), Error> {
+        if Invocation::parse(args).is_none() {
+            return Ok(());
+        }
+        Supervisor::run(args)
+    }
+
+    pub fn worker(args: &[OsString]) -> Result<(), Error> {
+        let cleanup = Self {
+            cancellation: Cancellation::monitor_parent()?,
+        };
+        cleanup.run(args)
+    }
+
+    fn run(&self, args: &[OsString]) -> Result<(), Error> {
         let Some(invocation) = Invocation::parse(args) else {
             return Ok(());
         };
         let cwd = std::env::current_dir().map_err(Error::CurrentDirectory)?;
         let manifest = invocation.manifest.as_ref().map(|path| cwd.join(path));
         let start = manifest.as_deref().and_then(Path::parent).unwrap_or(&cwd);
-        let mut settings = Config::find(start)?;
+        let settings = Config::find(start)?;
         if settings.min_free.is_none() && settings.max_target.is_none() {
             return Ok(());
         }
@@ -33,38 +61,44 @@ impl Cleanup {
         let _guard = tracing::subscriber::set_default(crate::diagnostics::Diagnostics::subscriber(
             settings.verbose,
         ));
+        let Some(_cleanup_lock) = CleanupLock::try_acquire()? else {
+            tracing::info!("cargo-target-cleaner: another cleanup is running; skipping cleanup");
+            return Ok(());
+        };
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: resolving Cargo workspace for cleanup checks");
+        self.cancellation.check()?;
         let workspace = invocation.workspace()?;
+        self.cancellation.check()?;
         let target_override = invocation.target.as_ref().map(|path| cwd.join(path));
         let target = target_override
             .as_deref()
             .unwrap_or(&workspace.target_directory);
-        if let Some(policy) = &mut settings.min_free {
-            policy.apply(&invocation, &workspace, target)?;
-        }
+        let registry = match &settings.min_free {
+            Some(policy) => policy.apply(self, &invocation, &workspace, target)?,
+            None => None,
+        };
         if let Some(limit) = settings.max_target
             && Self::directory_exceeds(target, limit)?
         {
-            Self::clean(invocation.command(CargoOperation::Clean), target)?;
+            self.clean(invocation.command(CargoOperation::Clean), target)?;
+        }
+        self.cancellation.check()?;
+        if let Some(registry) = registry {
+            registry.persist()?;
         }
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: cleanup checks complete; forwarding Cargo command");
         Ok(())
     }
 
-    fn clean(mut command: Command, target: &Path) -> Result<(), Error> {
-        let started = std::time::Instant::now();
+    fn clean(&self, mut command: Command, target: &Path) -> Result<(), Error> {
+        self.cancellation.check()?;
+        let started = Instant::now();
         tracing::info!(
             "cargo-target-cleaner: running cargo clean ({})",
             target.display()
         );
-        let status = command
-            .arg("--target-dir")
-            .arg(target)
-            .status()
-            .map_err(|source| Error::Execute {
-                operation: CargoOperation::Clean,
-                source,
-            })?;
+        command.arg("--target-dir").arg(target);
+        let status = ProcessTree::spawn(command)?.wait(Self::CLEAN_TIMEOUT, &self.cancellation)?;
         if !status.success() {
             return Err(Error::CleanFailed(status));
         }

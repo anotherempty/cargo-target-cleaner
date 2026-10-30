@@ -16,7 +16,7 @@ impl FreeSpacePolicy {
         Self {
             limit,
             selection: if across_projects {
-                Selection::AcrossProjects(Registry::default())
+                Selection::AcrossProjects
             } else {
                 Selection::Current
             },
@@ -24,14 +24,18 @@ impl FreeSpacePolicy {
     }
 
     pub(super) fn apply(
-        &mut self,
+        &self,
+        cleanup: &Cleanup,
         invocation: &Invocation<'_>,
         workspace: &Workspace,
         target: &Path,
-    ) -> Result<(), Error> {
-        if let Selection::AcrossProjects(registry) = &mut self.selection {
-            *registry = Registry::register(&workspace.workspace_root, target)?;
-        }
+    ) -> Result<Option<Registry>, Error> {
+        let registry = match self.selection {
+            Selection::AcrossProjects => {
+                Some(Registry::register(&workspace.workspace_root, target)?)
+            }
+            Selection::Current => None,
+        };
         let filesystem_path = FilesystemId::existing_path(target)?;
         let filesystem = FilesystemId::resolve(&filesystem_path)?;
         let available = fs2::available_space(&filesystem_path)
@@ -44,36 +48,42 @@ impl FreeSpacePolicy {
         );
         if available >= self.limit.get() {
             tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: free space is sufficient; skipping free-space cleanup");
-            return Ok(());
+            return Ok(registry);
         }
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: free space is below minimum; selecting a target to clean");
-        match &self.selection {
-            Selection::Current => {
-                Cleanup::clean(invocation.command(CargoOperation::Clean), target)?
-            }
-            Selection::AcrossProjects(registry) => {
-                if let Some(project) = registry.heaviest(filesystem)? {
+        match &registry {
+            None => cleanup.clean(invocation.command(CargoOperation::Clean), target)?,
+            Some(registry) => {
+                if let Some(project) = registry.heaviest(filesystem) {
                     let command = if project.is_current(&workspace.workspace_root, target)? {
                         invocation.command(CargoOperation::Clean)
                     } else {
                         project.clean_command()
                     };
-                    Cleanup::clean(command, project.target())?;
-                    // Cleaning the canonical path removes the destination of any
-                    // target symlinks. Restore it so those links remain usable.
-                    std::fs::create_dir_all(project.target()).map_err(|source| {
+                    let cleanup = cleanup.clean(command, project.target());
+                    // Restore symlink destinations even after partial or timed-out cleanup.
+                    let restoration = std::fs::create_dir_all(project.target()).map_err(|source| {
                         Error::file(FileOperation::Create, project.target(), source)
-                    })?;
+                    });
+                    match (cleanup, restoration) {
+                        (Err(cleanup), Err(restoration)) => {
+                            tracing::warn!("cargo-target-cleaner: {restoration}");
+                            return Err(cleanup);
+                        }
+                        (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
+                        (Ok(()), Ok(())) => {}
+                    }
                 }
             }
         }
-        Ok(())
+        Ok(registry)
     }
 }
 
+#[derive(Clone, Copy)]
 enum Selection {
     Current,
-    AcrossProjects(Registry),
+    AcrossProjects,
 }
 
 #[derive(Deserialize)]

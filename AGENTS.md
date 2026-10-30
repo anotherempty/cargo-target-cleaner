@@ -65,12 +65,11 @@
 - Verify affected behavior with appropriate tests and lint checks, and manually inspect constraints those checks cannot prove. Passing compilation alone is not a complete review.
 - Resolve related omissions within the changed type and its affected usage without waiting for the user to identify each one. Report unrelated findings separately rather than expanding into an unsolicited repository-wide rewrite.
 
-### Numeric values
+### Constants and values
 
-- Do not use magic numbers: numeric values with domain, protocol, or operational meaning must have meaningful names, including in tests.
-- Use named constants or associated constants for fixed values, existing typed constants or enums for protocol values, and typed configuration fields for configurable policies.
-- Names must explain purpose and units where applicable, such as timeout duration, byte limit, or retry count; names that merely spell out the number are insufficient.
-- Keep numeric definitions with the type or module that owns their meaning. Document non-obvious values and their rationale.
+- Use named constants for reused fixed values of any type and meaningful numeric values, including in tests.
+- Keep constants with their owning type or module; name them by purpose and units. Keep unrelated meanings separate and document non-obvious values.
+- Use existing typed constants or enums for protocol values and typed configuration fields for configurable policies.
 
 ### Ownership
 
