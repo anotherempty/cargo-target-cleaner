@@ -1,6 +1,6 @@
 [package]
 name = "cargo-target-cleaner"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A Cargo command wrapper with automatic cleanup across known projects"
 repository = "https://github.com/anotherempty/cargo-target-cleaner"
