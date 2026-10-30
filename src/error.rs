@@ -24,14 +24,20 @@ pub enum Error {
         operation: CargoOperation,
         source: io::Error,
     },
+    #[error("cleanup supervisor: {0}")]
+    Supervisor(#[source] io::Error),
+    #[error("cleanup supervisor failed ({0})")]
+    SupervisorFailed(ExitStatus),
+    #[error("cleanup cancelled because its wrapper exited")]
+    CleanupCancelled,
+    #[error("failed to establish cleanup process supervision: {0}")]
+    ProcessSupervision(#[source] io::Error),
     #[error("cargo clean failed ({0})")]
     CleanFailed(ExitStatus),
     #[error("cargo clean exceeded its timeout of {0:?} and was terminated")]
     CleanTimeout(std::time::Duration),
     #[error("failed to wait for cargo clean: {0}")]
     CleanWait(#[source] io::Error),
-    #[error("failed to terminate cargo clean: {0}")]
-    CleanTerminate(#[source] io::Error),
     #[error("cargo metadata failed ({status}): {}", String::from_utf8_lossy(stderr).trim())]
     MetadataFailed { status: ExitStatus, stderr: Vec<u8> },
     #[error("parse cargo metadata: {0}")]

@@ -97,6 +97,9 @@ global setting when omitted.
    skipped and the requested Cargo command runs immediately. The lock covers
    workspace resolution, fresh threshold checks, target selection, both cleanup
    policies, and registry persistence, and is released before forwarding Cargo.
+   A separate worker owns the lock and monitors the wrapper through a pipe. If
+   the wrapper exits or is killed, the worker cancels cleanup and retains the
+   lock until cleanup processes have stopped and target restoration is attempted.
    It coordinates cleaners; it does not protect active builds from later cleanup.
    Before `build`, `check`, `test`, `run`, `bench`, `doc`, `clippy`, `rustc`, or
    `rustdoc`, the wrapper asks Cargo for the workspace and target directory.
@@ -112,11 +115,16 @@ global setting when omitted.
 3. The free-space policy runs first, then the target-size policy. Each policy cleans
    at most one target directory. Cleanup removes **all Cargo artifacts in the selected target**,
    including other profiles or projects sharing it. Source files remain intact.
-   Each `cargo clean` process has a 10-minute timeout. On timeout, the wrapper
-   terminates and waits for that process before forwarding Cargo; partial deletions
-   are not rolled back. Cross-project cleanup attempts to restore target symlink
-   destinations even after cleanup errors or timeouts. This timeout does not cover metadata, filesystem scans,
-   or registry locking.
+   Each `cargo clean` has a 10-minute timeout. Cleanup runs in a dedicated Unix
+   process group or Windows Job Object, including subprocesses launched by Cargo
+   shims. On timeout or cancellation, the worker terminates that group and waits
+   for it to stop. Any descendants left behind when a shim exits are also stopped.
+   Partial deletions are not rolled back. Cross-project cleanup attempts to restore
+   target symlink destinations after success, errors, timeouts, or cancellation.
+   If process termination cannot be confirmed, the worker retains the lock and
+   does not return to forwarding. The timeout does not cover metadata, filesystem
+   scans, registry locking, or waiting for process termination. Unix subprocesses
+   that deliberately leave the cleanup process group are outside its supervision.
 4. The original command runs with its arguments and exit status preserved.
    Configuration, measurement, registry, or cleanup errors are reported as warnings;
    the original Cargo command still runs.

@@ -25,6 +25,7 @@ impl FreeSpacePolicy {
 
     pub(super) fn apply(
         &self,
+        cleanup: &Cleanup,
         invocation: &Invocation<'_>,
         workspace: &Workspace,
         target: &Path,
@@ -51,7 +52,7 @@ impl FreeSpacePolicy {
         }
         tracing::info!(target: crate::diagnostics::Diagnostics::PROGRESS_TARGET, "cargo-target-cleaner: free space is below minimum; selecting a target to clean");
         match &registry {
-            None => Cleanup::clean(invocation.command(CargoOperation::Clean), target)?,
+            None => cleanup.clean(invocation.command(CargoOperation::Clean), target)?,
             Some(registry) => {
                 if let Some(project) = registry.heaviest(filesystem) {
                     let command = if project.is_current(&workspace.workspace_root, target)? {
@@ -59,7 +60,7 @@ impl FreeSpacePolicy {
                     } else {
                         project.clean_command()
                     };
-                    let cleanup = Cleanup::clean(command, project.target());
+                    let cleanup = cleanup.clean(command, project.target());
                     // Restore symlink destinations even after partial or timed-out cleanup.
                     let restoration = std::fs::create_dir_all(project.target()).map_err(|source| {
                         Error::file(FileOperation::Create, project.target(), source)

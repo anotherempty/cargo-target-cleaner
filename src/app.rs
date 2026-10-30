@@ -27,6 +27,18 @@ impl App {
             }
             Some(CliCommand::Uninstall { shell }) => Self::print(&shell.integration().remove()?),
             Some(CliCommand::Exec { args }) => Self::forward(&args),
+            Some(CliCommand::CleanupWorker { args }) => {
+                match crate::cleanup::Cleanup::worker(&args) {
+                    Ok(()) => {}
+                    Err(error @ Error::CleanupCancelled) => {
+                        tracing::warn!("cargo-target-cleaner: {error}")
+                    }
+                    Err(error) => tracing::warn!(
+                        "cargo-target-cleaner: {error}; continuing with requested Cargo command"
+                    ),
+                }
+                Ok(ExitCode::SUCCESS)
+            }
             None => {
                 Self::command().print_help().map_err(Error::Help)?;
                 Ok(ExitCode::SUCCESS)
@@ -70,6 +82,11 @@ impl App {
 
 #[derive(Subcommand)]
 enum CliCommand {
+    #[command(hide = true)]
+    CleanupWorker {
+        #[arg(last = true)]
+        args: Vec<OsString>,
+    },
     /// Install shell integration and create the global cleanup config if missing.
     Init {
         #[arg(value_enum)]
