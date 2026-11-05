@@ -18,11 +18,15 @@ impl Diagnostics {
         };
         let subscriber = Self::with_file(verbose, file);
         if let Some(error) = error {
-            tracing::subscriber::with_default(Self::with_file(false, None), || {
+            tracing::subscriber::with_default(Self::stderr(), || {
                 tracing::warn!("cargo-target-cleaner: {error}; file logging is unavailable");
             });
         }
         subscriber
+    }
+
+    pub(crate) fn stderr() -> impl tracing::Subscriber + Send + Sync {
+        Self::with_file(false, None)
     }
 
     fn open_log() -> Result<File, Error> {

@@ -18,9 +18,24 @@ pub struct App {
 }
 
 impl App {
-    pub fn run() -> Result<ExitCode, Error> {
+    pub fn run() -> ExitCode {
         let app = Self::parse();
-        match app.command {
+        let _guard = if app.command.is_some() {
+            tracing::subscriber::set_default(crate::diagnostics::Diagnostics::subscriber(false))
+        } else {
+            tracing::subscriber::set_default(crate::diagnostics::Diagnostics::stderr())
+        };
+        match app.execute() {
+            Ok(code) => code,
+            Err(error) => {
+                tracing::error!("cargo-target-cleaner: {error}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    fn execute(self) -> Result<ExitCode, Error> {
+        match self.command {
             Some(CliCommand::Init { shell }) => {
                 crate::cleanup::Config::setup()?;
                 Self::print(&shell.integration().setup()?)
