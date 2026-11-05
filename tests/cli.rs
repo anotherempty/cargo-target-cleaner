@@ -25,11 +25,12 @@ fn clap_handles_help_version_and_invalid_commands() {
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_cargo-target-cleaner"))
             .args(args)
+            .env_remove("HOME")
             .output()
             .expect("run CLI");
         assert!(output.status.success(), "{output:?}");
         assert!(!output.stdout.is_empty());
-        assert!(output.stderr.is_empty());
+        assert!(output.stderr.is_empty(), "{output:?}");
     }
     for args in [
         vec!["unknown"],
@@ -39,6 +40,7 @@ fn clap_handles_help_version_and_invalid_commands() {
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_cargo-target-cleaner"))
             .args(args)
+            .env_remove("HOME")
             .output()
             .expect("run CLI");
         assert_eq!(output.status.code(), Some(USAGE_ERROR_EXIT_CODE));
